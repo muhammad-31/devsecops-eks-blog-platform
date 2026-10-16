@@ -1,0 +1,5 @@
+# Accepted Checkov findings for terraform/ (each with the reason).
+skip-check:
+  # Registry modules are pinned with version constraints in main.tf;
+  # commit-hash pinning applies to git module sources.
+  - CKV_TF_1
