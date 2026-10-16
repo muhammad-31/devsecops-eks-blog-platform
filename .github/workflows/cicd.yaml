@@ -151,15 +151,31 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
-      - name: Scan image (fixable CRITICAL/HIGH fail the build)
+      - name: Scan image
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-          format: table
-          exit-code: "1"
+          format: json
+          output: trivy.json
+          exit-code: "0"
           ignore-unfixed: true
           vuln-type: os,library
           severity: CRITICAL,HIGH
+
+      # Each finding becomes an annotation on the PR; any fixable CRITICAL/HIGH
+      # vulnerability fails the job, so nothing below (the push) runs.
+      - name: Enforce scan results (fixable CRITICAL/HIGH fail the build)
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          data = json.load(open("trivy.json"))
+          found = [(r["Target"], v) for r in data.get("Results", []) for v in (r.get("Vulnerabilities") or [])]
+          for target, v in found:
+              print(f"::error title={v['VulnerabilityID']} ({v['Severity']})::"
+                    f"{v['PkgName']} {v['InstalledVersion']} -> fixed in {v.get('FixedVersion')} [{target}]")
+          print(f"{len(found)} fixable CRITICAL/HIGH vulnerabilities")
+          sys.exit(1 if found else 0)
+          PY
 
       - name: Log in to GHCR
         if: github.event_name == 'push'
