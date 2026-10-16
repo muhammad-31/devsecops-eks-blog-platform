@@ -1,5 +1,5 @@
 # ---- Build stage ----
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci && npm cache clean --force
@@ -7,7 +7,7 @@ COPY . .
 RUN npm run build
 
 # ---- Production stage ----
-FROM nginx:1.27-alpine AS production
+FROM nginx:1.30-alpine AS production
 
 RUN rm -rf /etc/nginx/conf.d/default.conf /usr/share/nginx/html/*
 

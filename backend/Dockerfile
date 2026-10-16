@@ -1,11 +1,11 @@
 # ---- Build stage ----
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # ---- Production stage ----
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
