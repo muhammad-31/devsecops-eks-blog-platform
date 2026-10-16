@@ -19,6 +19,9 @@ spec:
         app.kubernetes.io/part-of: jerney
         app.kubernetes.io/component: frontend
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       automountServiceAccountToken: false
       tolerations:
         - key: "karpenter.sh/disrupted"

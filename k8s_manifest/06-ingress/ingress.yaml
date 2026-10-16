@@ -41,14 +41,9 @@ spec:
     - host: devopspractice.site
       http:
         paths:
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: jerney-backend
-                port:
-                  number: 5000
-
+          # Everything goes to the frontend; its Nginx proxies /api/ to the
+          # backend inside the cluster. This keeps the backend off the ALB and
+          # matches the jerney-backend-allow-frontend-only NetworkPolicy.
           - path: /
             pathType: Prefix
             backend:
