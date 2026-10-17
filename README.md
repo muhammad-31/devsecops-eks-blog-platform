@@ -38,9 +38,9 @@ flowchart LR
 |---|---|
 | Infrastructure | AWS EKS Auto Mode, VPC (3 AZs), EBS gp3, ALB, KMS, provisioned with Terraform |
 | CI | GitHub Actions: ESLint, npm audit, Checkov, Hadolint, Docker Buildx, Trivy |
-| CD | Argo CD (GitOps), image tags bumped by the pipeline |
+| CD | Argo CD (GitOps, [`argocd/application.yaml`](argocd/application.yaml)), image tags bumped by the pipeline |
 | Application | React + Vite served by Nginx, Node.js/Express API, PostgreSQL |
-| Ingress | AWS Load Balancer (EKS Auto Mode), HTTPS with ACM, Route 53 |
+| Ingress | AWS Load Balancer (EKS Auto Mode), HTTPS with an ACM certificate; the domain's DNS record points at the ALB |
 
 ## CI/CD pipeline
 
@@ -51,11 +51,12 @@ Pull requests run every check; pushes to `main` also publish and deploy.
 |---|---|---|
 | 1. Lint | ESLint | there are lint errors |
 | 2. Dependency audit | npm audit | a runtime dependency has a high or critical advisory |
-| 3. IaC scan | Checkov | Terraform has a misconfiguration (Kubernetes manifests: report only, see below) |
+| 3. IaC | `terraform fmt`/`validate`, Checkov | Terraform is malformed or misconfigured, including resources created by the registry VPC/EKS modules (Kubernetes manifests: report only, see below) |
 | 4. Dockerfile lint | Hadolint | a Dockerfile breaks best practices |
-| 5. Build | Docker Buildx | the image does not build |
-| 6. Image scan | Trivy | the image has a fixable CRITICAL or HIGH CVE (nothing is pushed in that case) |
-| 7. Deploy | git commit | (runs only after 1-6 pass) new image tags are written to `k8s_manifest/`; Argo CD syncs them |
+| 5. Smoke test | Docker Compose | the local stack does not start, or a post cannot be created through Nginx |
+| 6. Build | Docker Buildx | the image does not build |
+| 7. Image scan | Trivy | the image has a fixable CRITICAL or HIGH CVE (nothing is pushed in that case) |
+| 8. Deploy | git commit | (runs only after 1-7 pass) new image tags are written to `k8s_manifest/`; Argo CD syncs them |
 
 **Supply-chain hardening:** every third-party action is pinned to a full commit
 SHA. In March 2026 attackers force-pushed most `aquasecurity/trivy-action` tags
@@ -69,6 +70,10 @@ Terraform with the official AWS VPC and EKS modules:
 - **EKS Auto Mode** with the `general-purpose` and `system` node pools, so there are no node groups to manage.
 - **VPC** with three public and three private subnets across three AZs and a single NAT gateway.
 - **Secrets encryption** with KMS, and all control-plane log types sent to CloudWatch.
+- **Kubernetes 1.36**, in standard support until August 2027. An existing cluster
+  on an older version has to be upgraded one minor version at a time.
+- **Public API endpoint** for kubectl and CI, restricted by
+  `cluster_endpoint_public_access_cidrs` (open by default, set it to your own ranges).
 - **EBS gp3** encrypted volume for PostgreSQL (`Retain` reclaim policy).
 
 ```bash
@@ -83,6 +88,10 @@ and load balancer cost money every hour they run.
 
 ## Deploying to Kubernetes
 
+Set your domain and ACM certificate ARN in
+[`k8s_manifest/06-ingress/ingress.yaml`](k8s_manifest/06-ingress/ingress.yaml)
+(the values there are placeholders).
+
 The database credentials are never stored in Git. Create them first (see
 [`docs/db-secret.example.yaml`](docs/db-secret.example.yaml)):
 
@@ -94,7 +103,13 @@ kubectl -n jerney create secret generic jerney-db-secret \
   --from-literal=POSTGRES_DB=jerney_db
 ```
 
-Then point an Argo CD Application at `k8s_manifest/` (recursive), or apply it in order:
+Then register the Argo CD Application, which syncs `k8s_manifest/` from `main`:
+
+```bash
+kubectl apply -n argocd -f argocd/application.yaml
+```
+
+Without Argo CD, apply the manifests in order:
 
 ```bash
 for dir in 01-storage 03-database 04-backend 05-frontend 06-ingress 07-network; do
@@ -108,11 +123,11 @@ done
 |---|---|
 | Only the frontend is exposed; it proxies `/api/` to the backend inside the cluster | `06-ingress`, `frontend/nginx.conf` |
 | NetworkPolicies: database accepts only the backend, backend accepts only the frontend | `07-network` |
-| Non-root containers, no privilege escalation, `RuntimeDefault` seccomp on every pod | deployments |
-| Backend: read-only root filesystem, all capabilities dropped | `04-backend` |
-| Frontend: all capabilities dropped except `NET_BIND_SERVICE` (Nginx on port 80) | `05-frontend` |
+| No privilege escalation and `RuntimeDefault` seccomp on every pod | deployments |
+| Backend: non-root, read-only root filesystem, all capabilities dropped | `04-backend` |
+| Frontend: non-root (UID 101), Nginx on port 8080, all capabilities dropped | `05-frontend` |
 | Images built from current LTS bases (Node 22, Nginx 1.30) and scanned before push | Dockerfiles, pipeline |
-| DB credentials created out of band, never committed | `docs/db-secret.example.yaml`, `.gitignore` |
+| No credentials in the repository: the cluster Secret is created out of band, local development reads an untracked `.env` | `docs/db-secret.example.yaml`, `.env.example`, `.gitignore` |
 
 **Open items** (why the Kubernetes Checkov scan is report-only for now):
 PostgreSQL still runs as root (the official image needs it for initialisation),
@@ -135,16 +150,18 @@ External Secrets Operator with AWS Secrets Manager.
 │   ├── 05-frontend/
 │   ├── 06-ingress/        # ALB Ingress (HTTPS, ACM)
 │   └── 07-network/        # NetworkPolicies
+├── argocd/                # Argo CD Application for k8s_manifest/
 ├── docs/                  # Secret template
-├── deploy/                # Single-EC2 alternative (Nginx + setup script)
-├── docker-compose.yaml    # Local development
+├── deploy/                # Single-EC2 alternative (Nginx, PM2, setup script)
+├── docker-compose.yaml    # Local development (credentials from .env)
 └── .github/workflows/cicd.yaml
 ```
 
 ## Local development
 
 ```bash
-docker compose up
+cp .env.example .env    # then set POSTGRES_PASSWORD in .env
+docker compose up --build
 ```
 
 Open http://localhost. The frontend's Nginx proxies `/api/` to the backend, the same way it does in the cluster.
