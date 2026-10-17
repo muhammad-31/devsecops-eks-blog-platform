@@ -34,8 +34,11 @@ module "eks" {
   vpc_id                          = module.vpc.vpc_id
   subnet_ids                      = module.vpc.private_subnets
   cluster_endpoint_private_access = true
-  cluster_endpoint_public_access  = true
-  authentication_mode             = "API"
+  # The public endpoint is what kubectl and Argo CD use from outside the VPC.
+  # Restrict it to known networks with cluster_endpoint_public_access_cidrs.
+  cluster_endpoint_public_access       = true
+  cluster_endpoint_public_access_cidrs = var.cluster_endpoint_public_access_cidrs
+  authentication_mode                  = "API"
 
   cluster_encryption_config = {
     resources = ["secrets"]

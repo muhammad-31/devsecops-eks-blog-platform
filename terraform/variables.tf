@@ -19,9 +19,15 @@ variable "cluster_name" {
 }
 
 variable "cluster_version" {
-  description = "The version of the EKS cluster"
+  description = "Kubernetes version of the EKS cluster. Keep it in standard support; extended support costs six times as much per hour."
   type        = string
-  default     = "1.32"
+  default     = "1.36"
+}
+
+variable "cluster_endpoint_public_access_cidrs" {
+  description = "Networks allowed to reach the public Kubernetes API endpoint. Set this to your office/VPN ranges; the default leaves it open to the internet (still behind IAM authentication)."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }
 
 variable "vpc_cidr" {
