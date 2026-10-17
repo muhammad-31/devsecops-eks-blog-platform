@@ -9,7 +9,11 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+// The UI calls /api/ on its own origin (Nginx in production, the Vite proxy in
+// development), so CORS stays off unless a separate origin is configured.
+if (process.env.CORS_ORIGIN) {
+  app.use(cors({ origin: process.env.CORS_ORIGIN }));
+}
 app.use(express.json());
 
 // Health check

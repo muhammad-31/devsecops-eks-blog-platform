@@ -8,15 +8,14 @@ metadata:
     app.kubernetes.io/part-of: jerney
     app.kubernetes.io/component: frontend
   annotations:
-    alb.ingress.kubernetes.io/load-balancer-class: eks.amazonaws.com/alb
-
     alb.ingress.kubernetes.io/scheme: internet-facing
 
     alb.ingress.kubernetes.io/target-type: ip
 
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
 
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-south-1:448049799329:certificate/eb9ec68e-d7ce-45fe-bbb0-bc504f2f8b48
+    # Set to the ACM certificate for your domain (same region as the cluster).
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:<region>:<account-id>:certificate/<certificate-id>
 
     alb.ingress.kubernetes.io/ssl-redirect: "443"
 
@@ -37,18 +36,15 @@ metadata:
     alb.ingress.kubernetes.io/tags: "Project=jerney,ManagedBy=k8s-alb-ingress-controller"
 
 spec:
+  ingressClassName: alb
   rules:
-    - host: devopspractice.site
+    # Replace with your domain; its DNS record should point at the ALB.
+    - host: blog.example.com
       http:
         paths:
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: jerney-backend
-                port:
-                  number: 5000
-
+          # Everything goes to the frontend; its Nginx proxies /api/ to the
+          # backend inside the cluster. This keeps the backend off the ALB and
+          # matches the jerney-backend-allow-frontend-only NetworkPolicy.
           - path: /
             pathType: Prefix
             backend:

@@ -1,0 +1,31 @@
+# Argo CD Application for the blog. Apply once, after Argo CD is installed and
+# the jerney-db-secret exists (see README "Deploying to Kubernetes"):
+#   kubectl apply -n argocd -f argocd/application.yaml
+# From then on, every change merged to k8s_manifest/ on main (including the
+# image tags the pipeline bumps) is synced automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jerney
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/muhammad-31/devsecops-eks-blog-platform.git
+    targetRevision: main
+    path: k8s_manifest
+    directory:
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: jerney
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m

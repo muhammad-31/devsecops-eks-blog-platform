@@ -1,15 +1,22 @@
 # ---- Build stage ----
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # ---- Production stage ----
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 RUN apk --no-cache add dumb-init
+
+# The app runs with plain `node`; npm, npx, corepack and yarn are build tools.
+# Removing them shrinks the image and drops their bundled dependencies, which
+# are a common source of scanner findings.
+RUN rm -rf /usr/local/lib/node_modules /opt/yarn-* \
+      /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+      /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 WORKDIR /app
 

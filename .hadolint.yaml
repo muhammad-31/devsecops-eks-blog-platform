@@ -1,0 +1,6 @@
+# Version-pinning Alpine packages (DL3018) breaks builds whenever Alpine
+# publishes a patch; base images are pinned by tag and every image is scanned
+# with Trivy instead.
+ignored:
+  - DL3018
+failure-threshold: warning

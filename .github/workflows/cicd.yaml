@@ -1,36 +1,47 @@
 name: Jerney DevSecOps Pipeline
 
+# Pull requests run every check without publishing anything.
+# Pushes to main also publish the images (only after they pass the scan) and
+# bump the image tags in k8s_manifest/, which Argo CD then syncs.
+
 on:
   push:
-    branches: ["*"]
+    branches: [main]
   pull_request:
-    branches: ["*"]
 
 permissions:
   contents: read
 
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
-  DOCKER_REGISTRY: ghcr.io
-  BACKEND_IMAGE: ghcr.io/muhammad-31/jerney-backend
-  FRONTEND_IMAGE: ghcr.io/muhammad-31/jerney-frontend
+  REGISTRY: ghcr.io/muhammad-31
+  NODE_VERSION: "22"
+
+# Third-party actions are pinned to full commit SHAs. In March 2026 most
+# trivy-action version tags were force-pushed to malicious commits; a tag or
+# branch reference (like @master) would have run that code.
 
 jobs:
-  # stage 1 - lint both frontend and backend before anything else
+  # stage 1 - lint both components
   lint:
-    name: Lint Code
-    runs-on: ubuntu-latest
-    continue-on-error: true
+    name: Lint (${{ matrix.component }})
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         component: [backend, frontend]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "${{ matrix.component }}/package-lock.json"
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.component }}/package-lock.json
 
       - working-directory: ${{ matrix.component }}
         run: npm ci
@@ -38,58 +49,146 @@ jobs:
       - working-directory: ${{ matrix.component }}
         run: npm run lint
 
-  # stage 2 - check npm dependencies for known vulnerabilities
+  # stage 2 - known vulnerabilities in runtime dependencies block the build
   sca:
-    name: Dependency Audit
-    runs-on: ubuntu-latest
-    needs: lint
+    name: Dependency audit (${{ matrix.component }})
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         component: [backend, frontend]
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: "${{ matrix.component }}/package-lock.json"
+          persist-credentials: false
 
-      - working-directory: ${{ matrix.component }}
-        run: npm ci
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
-      - working-directory: ${{ matrix.component }}
-        run: npm audit --audit-level=high || true
+      # Production dependencies only: dev tooling (Vite, nodemon) never ships
+      # in the images. The full report is printed for visibility.
+      - name: npm audit (runtime dependencies, high and critical)
+        working-directory: ${{ matrix.component }}
+        run: |
+          npm audit --audit-level=high || true
+          npm audit --omit=dev --audit-level=high
 
-  # stage 3 - scan terraform and k8s manifests for misconfigurations
+  # stage 3 - infrastructure and manifest misconfigurations
   iac-scan:
-    name: IaC Security Scan
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    needs: lint
+    name: IaC validate and scan (Terraform, Checkov)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: bridgecrewio/checkov-action@v12
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt and validate
+        working-directory: terraform
+        run: |
+          terraform fmt -check -diff
+          terraform init -backend=false -input=false
+          terraform validate
+
+      # External modules are downloaded so the scan covers the VPC and EKS
+      # resources the registry modules create, not just the module calls.
+      - name: Terraform (blocking)
+        id: checkov-tf
+        uses: bridgecrewio/checkov-action@6f26dc90000b74feb589a906cdfae540f5119895 # v12.3134.0
         with:
           directory: terraform/
           framework: terraform
-          soft_fail: false
-          skip_check: CKV_AWS_39,CKV_AWS_58
-          output_format: cli
+          config_file: .checkov.yaml
+          download_external_modules: true
+          output_format: cli,json
+          output_file_path: console,checkov-terraform.json
 
-      - uses: bridgecrewio/checkov-action@v12
+      - name: Annotate Terraform findings
+        if: failure() && steps.checkov-tf.outcome == 'failure'
+        run: |
+          python3 - <<'PY'
+          import json
+          data = json.load(open("checkov-terraform.json"))
+          for report in data if isinstance(data, list) else [data]:
+              for c in report.get("results", {}).get("failed_checks", []):
+                  print(f"::error title={c['check_id']}::{c['check_name']}: "
+                        f"{c['resource']} ({c['file_path']})")
+          PY
+
+      - name: Kubernetes manifests (report only, see README)
+        uses: bridgecrewio/checkov-action@6f26dc90000b74feb589a906cdfae540f5119895 # v12.3134.0
         with:
           directory: k8s_manifest/
           framework: kubernetes
           soft_fail: true
           output_format: cli
 
-  # stage 4 - build images and push to ghcr, skipped on pull requests
-  build:
-    name: Build Image
-    runs-on: ubuntu-latest
-    needs: sca
+  # stage 4 - Dockerfile best practices
+  dockerfile-lint:
+    name: Dockerfile lint (${{ matrix.component }})
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: ${{ matrix.component }}/Dockerfile
+          config: .hadolint.yaml
+
+  # stage 5 - the local stack from docker-compose.yaml must keep working:
+  # build it, start it and create a post through the frontend's Nginx.
+  compose-smoke:
+    name: Local stack smoke test (docker compose)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Start the stack
+        run: |
+          cp .env.example .env
+          sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+          docker compose up -d --build
+
+      - name: Smoke test through Nginx
+        run: |
+          for _ in $(seq 1 30); do
+            curl -fsS http://localhost/api/health && break
+            sleep 2
+          done
+          page="$(curl -fsS http://localhost/)"
+          grep -q '<div id="root">' <<<"$page"
+          curl -fsS -X POST http://localhost/api/posts \
+            -H 'Content-Type: application/json' \
+            -d '{"title":"smoke test","content":"created by CI","author":"ci"}'
+          posts="$(curl -fsS http://localhost/api/posts)"
+          grep -q 'smoke test' <<<"$posts"
+
+      - name: Annotate container logs
+        if: failure()
+        run: |
+          logs="$(docker compose ps -a; docker compose logs --no-color | tail -80)"
+          logs="${logs//'%'/'%25'}"; logs="${logs//$'\n'/'%0A'}"
+          echo "::error title=docker compose logs::${logs}"
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
+
+  # stages 6 + 7 - build, scan, and only then push
+  build-scan-push:
+    name: Build, scan, push (${{ matrix.component }})
+    runs-on: ubuntu-24.04
+    needs: [lint, sca, iac-scan, dockerfile-lint, compose-smoke]
     permissions:
       contents: read
       packages: write
@@ -97,98 +196,98 @@ jobs:
       matrix:
         component: [backend, frontend]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/login-action@v3
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/jerney-${{ matrix.component }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (loaded locally, not pushed yet)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./${{ matrix.component }}
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          format: json
+          output: trivy.json
+          exit-code: "0"
+          ignore-unfixed: true
+          vuln-type: os,library
+          severity: CRITICAL,HIGH
+
+      # Each finding becomes an annotation on the PR; any fixable CRITICAL/HIGH
+      # vulnerability fails the job, so nothing below (the push) runs.
+      - name: Enforce scan results (fixable CRITICAL/HIGH fail the build)
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          data = json.load(open("trivy.json"))
+          found = [(r["Target"], v) for r in data.get("Results", []) for v in (r.get("Vulnerabilities") or [])]
+          for target, v in found:
+              print(f"::error title={v['VulnerabilityID']} ({v['Severity']})::"
+                    f"{v['PkgName']} {v['InstalledVersion']} -> fixed in {v.get('FixedVersion')} [{target}]")
+          print(f"{len(found)} fixable CRITICAL/HIGH vulnerabilities")
+          sys.exit(1 if found else 0)
+          PY
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/muhammad-31/jerney-${{ matrix.component }}
-          tags: |
-            type=sha,prefix=
-            type=ref,event=branch
-            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Push the scanned image
+        if: github.event_name == 'push'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker push "$tag"
+          done
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./${{ matrix.component }}
-          file: ./${{ matrix.component }}/Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # stage 5 - trivy scans the built images for OS and library CVEs
-  image-scan:
-    name: Image Scan
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    needs: build
-    strategy:
-      matrix:
-        component: [backend, frontend]
-    steps:
-      - uses: actions/checkout@v4
-
-      - run: docker build -t jerney-${{ matrix.component }}:scan ./${{ matrix.component }}
-
-      - uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: jerney-${{ matrix.component }}:scan
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-
-  # stage 6 - hadolint checks dockerfiles for best practice violations
-  dockerfile-lint:
-    name: Dockerfile Lint
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      matrix:
-        component: [backend, frontend]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: ${{ matrix.component }}/Dockerfile
-          failure-threshold: warning
-
-  # stage 7 - update image tags in k8s manifests after all scans pass
+  # stage 8 - point the manifests at the new images; Argo CD syncs the change
   update-manifest:
-    name: Update K8s Manifest
-    runs-on: ubuntu-latest
+    name: Update image tags
+    runs-on: ubuntu-24.04
     if: github.event_name == 'push'
-    needs: [image-scan, dockerfile-lint, iac-scan]
+    needs: build-scan-push
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - id: sha
-        run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+      - name: Set image tags
+        run: |
+          tag="$(git rev-parse --short=7 HEAD)"
+          sed -i "s|image: .*jerney-backend:.*|image: ${REGISTRY}/jerney-backend:${tag}|" k8s_manifest/04-backend/deployment.yaml
+          sed -i "s|image: .*jerney-frontend:.*|image: ${REGISTRY}/jerney-frontend:${tag}|" k8s_manifest/05-frontend/deployment.yaml
+          git diff --stat
 
-      - run: |
-          TAG=${{ steps.sha.outputs.short }}
-          sed -i "s|image: .*jerney-backend.*|image: ghcr.io/muhammad-31/jerney-backend:${TAG}|" k8s_manifest/04-backend/deployment.yaml
-          sed -i "s|image: .*jerney-frontend.*|image: ghcr.io/muhammad-31/jerney-frontend:${TAG}|" k8s_manifest/05-frontend/deployment.yaml
-
-      - run: |
+      - name: Commit
+        run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add k8s_manifest/
-          git diff --cached --quiet || git commit -m "update images"
+          git diff --cached --quiet && exit 0
+          git commit -m "Deploy $(git rev-parse --short=7 HEAD) [skip ci]"
+          # Someone may have pushed while the images were building.
+          git pull --rebase origin main
           git push

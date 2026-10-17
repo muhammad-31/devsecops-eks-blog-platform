@@ -1,0 +1,37 @@
+# Accepted Checkov findings for terraform/, each with the reason. The scan
+# includes the resources created by the registry VPC and EKS modules, so
+# several of these are module internals that inline skips cannot reach.
+skip-check:
+  # Registry modules are pinned with version constraints in main.tf;
+  # commit-hash pinning applies to git module sources.
+  - CKV_TF_1
+
+  # The default security group has no rules: the VPC module manages it with
+  # empty ingress/egress (set explicitly in main.tf). Checkov cannot follow
+  # the module's count-based aws_default_security_group.
+  - CKV2_AWS_12
+
+  # Node security group and IPv6 CNI policy document belong to managed node
+  # groups and IPv6 clusters. This cluster uses EKS Auto Mode node pools on
+  # IPv4, so neither is attached or used.
+  - CKV2_AWS_5
+  - CKV_AWS_111
+  - CKV_AWS_356
+
+  # Control-plane logs are kept for the module default of 90 days; audit
+  # retention beyond that belongs in a log archive, not CloudWatch.
+  - CKV_AWS_338
+
+  # The public API endpoint is required for kubectl and CI from outside the
+  # VPC. It still needs IAM authentication; restrict the source ranges with
+  # cluster_endpoint_public_access_cidrs (see README "Infrastructure").
+  - CKV_AWS_38
+  - CKV_AWS_39
+
+  # Secrets encryption is enabled (cluster_encryption_config, module-created
+  # KMS key); Checkov does not resolve the module's dynamic block.
+  - CKV_AWS_58
+
+  # The version is set in variables.tf / terraform.tfvars (1.36, standard
+  # support until August 2027); Checkov's built-in version list lags EKS.
+  - CKV_AWS_339

@@ -1,19 +1,19 @@
-aws/
+# Dependencies and build output
+node_modules/
+frontend/dist/
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Secrets: never commit real credentials
+aws/
 *.env
 *.pem
 *.key
+k8s_manifest/02-secrets/db-secret.yaml
+k8s_manifest/**/*secret*.yaml
 
 .DS_Store
-
-node_modules/
-.terraform/
-*.tfstate
-*.tfstate.*
-crash.log
-.terraform/
-*.tfstate
-*.tfstate.*
-terraform.tfstate
-crash.log
-node_modules/
