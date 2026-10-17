@@ -4,21 +4,23 @@ services:
     image: postgres:16-alpine
     container_name: jerney-db
     restart: unless-stopped
+    # Credentials come from .env (copy .env.example); nothing is hard-coded here.
     environment:
-      POSTGRES_USER: jerney_user
-      POSTGRES_PASSWORD: jerney_pass_2026
-      POSTGRES_DB: jerney_db
+      POSTGRES_USER: ${POSTGRES_USER:-jerney_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env, see .env.example}
+      POSTGRES_DB: ${POSTGRES_DB:-jerney_db}
+    # Reachable from this machine only (for psql / a GUI), not from the network.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jerney_user -d jerney_db"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
-    # Security: read-only root filesystem where possible
+    # Scratch space in memory instead of the container's writable layer
     tmpfs:
       - /tmp
       - /run
@@ -32,11 +34,11 @@ services:
     restart: unless-stopped
     environment:
       PORT: "5000"
-      DB_USER: jerney_user
-      DB_PASSWORD: jerney_pass_2026
+      DB_USER: ${POSTGRES_USER:-jerney_user}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env, see .env.example}
       DB_HOST: db
       DB_PORT: "5432"
-      DB_NAME: jerney_db
+      DB_NAME: ${POSTGRES_DB:-jerney_db}
     expose:
       - "5000"
     depends_on:
@@ -56,8 +58,9 @@ services:
       dockerfile: Dockerfile
     container_name: jerney-frontend
     restart: unless-stopped
+    # Nginx runs as a non-root user on 8080 inside the container.
     ports:
-      - "80:80"
+      - "80:8080"
     depends_on:
       - backend
     security_opt:
