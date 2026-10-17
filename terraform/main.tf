@@ -10,6 +10,12 @@ module "vpc" {
   enable_nat_gateway = true
   single_nat_gateway = true
 
+  # Take over the VPC's default security group and leave it without rules,
+  # so nothing can accidentally use it.
+  manage_default_security_group  = true
+  default_security_group_ingress = []
+  default_security_group_egress  = []
+
   public_subnet_tags = {
     "kubernetes.io/role/elb" = "1"
   }
